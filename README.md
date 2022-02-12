@@ -1,4 +1,4 @@
-# featbundle-aware_sampling
+# aware_sampling
 
 ### For description of argments
 ```
