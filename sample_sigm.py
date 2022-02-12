@@ -31,6 +31,141 @@ def readcorpus(infname, weighted):
             i += 1
     return indices_to_words
 
+
+
+def aware_sample(indices_to_words, numtrain, numdev, numtest, lemma_overlap_ratio=0.5, feat_overlap_ratio=1.0):
+
+    def get_category_indices(indices_to_words, category):
+        category_to_categoryindices = {}
+        wordindices_to_categoryindices = {}
+        cindex = -1
+        for windex, wordtup in indices_to_words.items():
+            cat = wordtup[category]
+            if cat not in category_to_categoryindices:
+                cindex += 1
+                category_to_categoryindices[cat] = cindex
+            wordindices_to_categoryindices[windex] = category_to_categoryindices[cat]
+        return wordindices_to_categoryindices
+
+    wordindices_to_lemmaindices = get_category_indices(indices_to_words, LEMMA)
+    wordindices_to_featsindices = get_category_indices(indices_to_words, FEATS)
+
+    indices, words = zip(*tuple(indices_to_words.items()))
+    sumcounts = sum([word[FREQ] for i, word in enumerate(words)])
+    probs = [word[FREQ]/sumcounts for word in words]
+    # weighted sample w/o replacement
+    sample = choice(indices, len(indices), replace=False, p=probs)
+    # shuffle so that train/dev/test are drawn uniformly w/ respect to one another
+    random.shuffle(sample)
+    trainsample = set(sample[:numtrain])
+    devsample = set(sample[numtrain:numtrain+numdev])
+
+    # Now pick a prospective test set and swap items as necessary
+    # to achieve desired percent overlaps
+    testsample = sample[numtrain+numdev:numtrain+numdev+numtest]
+    backuptest = sample[numtrain+numdev+numtest:]
+
+    feats_in_train = set([wordindices_to_featsindices[i] for i in trainsample])
+    lemmas_in_train = set([wordindices_to_lemmaindices[i] for i in trainsample])
+    # Partition the backups into 4 generators to draw from as necessarily
+    backup_fin_lin = (item for item in backuptest if wordindices_to_lemmaindices[item] in lemmas_in_train and wordindices_to_featsindices[item] in feats_in_train)
+    backup_fin_lout = (item for item in backuptest if wordindices_to_lemmaindices[item] not in lemmas_in_train and wordindices_to_featsindices[item] in feats_in_train)
+    backup_fout_lout = (item for item in backuptest if wordindices_to_lemmaindices[item] not in lemmas_in_train and wordindices_to_featsindices[item] not in feats_in_train)
+    backup_fout_lin = (item for item in backuptest if wordindices_to_lemmaindices[item] in lemmas_in_train and wordindices_to_featsindices[item] not in feats_in_train)
+
+    # Calculate target overlaps as counts
+    desired_featoverlap = int(feat_overlap_ratio * numtest)
+    current_featoverlap = len([item for item in testsample if wordindices_to_featsindices[item] in feats_in_train])
+    desired_lemmaoverlap = int(lemma_overlap_ratio * numtest)
+    current_lemmaoverlap = len([item for item in testsample if wordindices_to_lemmaindices[item] in lemmas_in_train])
+    
+
+    # Swap out items from the prospective test set with backup test items
+    # Until the desired overlap ratios are reached or backups are exhausted.
+    for i, item in enumerate((t for t in testsample)):
+        if wordindices_to_featsindices[item] not in feats_in_train:
+            if wordindices_to_lemmaindices[item] not in lemmas_in_train:
+                newitem = None
+                if current_featoverlap < desired_featoverlap: 
+                    if current_lemmaoverlap < desired_lemmaoverlap:
+                        newitem = next(backup_fin_lin, None) # attempt to increase lemma and feat overlap
+                        current_featoverlap += 1 if newitem else 0
+                        current_lemmaoverlap += 1 if newitem else 0
+                    if current_lemmaoverlap >= desired_lemmaoverlap or newitem == None:
+                        newitem = next(backup_fin_lout, None) # attempt to increase feat overlap, maintain lemma overlap
+                        current_featoverlap += 1 if newitem else 0
+                if current_featoverlap >= desired_featoverlap or newitem == None:
+                    if current_lemmaoverlap <= desired_lemmaoverlap:
+                        newitem = next(backup_fout_lin, None) # attempt to increase lemma overlap, maintain feat overlap
+                        current_lemmaoverlap += 1 if newitem else 0
+                    #if current_lemmaoverlap > desired_lemmaoverlap or newitem == None:
+                    #    newitem = next(backup_fout_lout, None) # this case would do nothing
+                if newitem:
+                    testsample[i] = newitem
+            elif wordindices_to_lemmaindices[item] in lemmas_in_train:
+                newitem = None
+                if current_featoverlap < desired_featoverlap:
+                    if current_lemmaoverlap <= desired_lemmaoverlap:
+                        newitem = next(backup_fin_lin, None) # attempt to increase feat overlap, maintain lemma overlap
+                        current_featoverlap += 1 if newitem else 0
+                    if current_lemmaoverlap > desired_lemmaoverlap or newitem == None:
+                        newitem = next(backup_fin_lout, None) # attempt to increase feat overlap, decrease lemma overlap
+                        current_featoverlap += 1 if newitem else 0
+                        current_lemmaoverlap -= 1 if newitem else 0
+                if current_featoverlap >= desired_featoverlap or newitem == None:
+                    #if current_lemmaoverlap < desired_lemmaoverlap:
+                    #    newitem = next(backup_fout_lin, None) # this case would do nothing
+                    if current_lemmaoverlap > desired_lemmaoverlap or newitem == None:
+                        newitem = next(backup_fout_lout, None) # attempt to maintain feat overlap, decrease lemma overlap
+                        current_lemmaoverlap -= 1 if newitem else 0
+                if newitem:
+                    testsample[i] = newitem
+        elif wordindices_to_featsindices[item] in feats_in_train:
+            if wordindices_to_lemmaindices[item] not in lemmas_in_train:
+                newitem = None
+                if current_featoverlap <= desired_featoverlap:
+                    if current_lemmaoverlap < desired_lemmaoverlap:
+                        newitem = next(backup_fin_lin, None) # attempt to maintain feat overlap, increase lemma overlap
+                        current_lemmaoverlap += 1 if newitem else 0
+                    #if current_lemmaoverlap >= desired_lemmaoverlap or newitem == None:
+                    #    newitem = next(backup_fin_lout, None) # this case would do nothing
+                if current_featoverlap > desired_featoverlap or newitem == None:
+                    if current_lemmaoverlap < desired_lemmaoverlap:
+                        newitem = next(backup_fout_lin, None) # attempt to lower feat overlap, increase lemma overlap
+                        current_featoverlap -= 1 if newitem else 0
+                        current_lemmaoverlap += 1 if newitem else 0
+                    if current_lemmaoverlap >= desired_lemmaoverlap or newitem == None:
+                        newitem = next(backup_fout_lout, None) # attempt o decreae feat overlap, maintain lemma overlap
+                        current_featoverlap -= 1 if newitem else 0
+                if newitem:
+                    testsample[i] = newitem
+            elif wordindices_to_lemmaindices[item] in lemmas_in_train:
+                newitem = None
+                if current_featoverlap <= desired_featoverlap:
+                    #if current_lemmaoverlap <= desired_lemmaoverlap:
+                    #    newitem = next(backup_fin_lin, None) # this case would do nothing
+                    if current_lemmaoverlap > desired_lemmaoverlap:
+                        newitem = next(backup_fin_lout, None) # attempt to maintain feat overlap, decrease lemma overlap
+                        current_lemmaoverlap -= 1 if newitem else 0
+                if current_featoverlap > desired_featoverlap or newitem == None:
+                    if current_lemmaoverlap <= desired_lemmaoverlap:
+                        newitem = next(backup_fout_lin, None) # attempt to decrease feat overlap, maintain lemma overlap
+                        current_featoverlap -= 1 if newitem else 0
+                    if current_lemmaoverlap > desired_lemmaoverlap or newitem == None:
+                        newitem = next(backup_fout_lout, None) # attempt to decrease both feat overlap and lemma overlap
+                        current_lemmaoverlap -= 1 if newitem else 0
+                        current_featoverlap -= 1 if newitem else 0
+                if newitem:
+                    testsample[i] = newitem
+        if current_featoverlap == desired_featoverlap and current_lemmaoverlap == desired_lemmaoverlap:
+            break # yay, we did it!
+        # If we didn't succeed perfectly, we got as close as the test sample will allow
+        # The other option would be to resample and try again, hoping we get a better test sample
+
+    return trainsample, devsample, testsample
+
+
+
 def naive_sample(indices_to_words, numtrain, numdev, numtest):
     if numtrain + numtest > len(indices_to_words):
         print("Sampling too many!", numtrain+numtest, len(indices_to_words))
@@ -38,7 +173,9 @@ def naive_sample(indices_to_words, numtrain, numdev, numtest):
     indices, words = zip(*tuple(indices_to_words.items()))
     sumcounts = sum([word[FREQ] for word in words])
     probs = [word[FREQ]/sumcounts for word in words]
+    # weighted sample w/o replacement
     sample = choice(indices, numtrain+numdev+numtest, replace=False, p=probs)
+    # shuffle so that train/dev/test are drawn uniformly w/ respect to one another
     random.shuffle(sample) # need to shuffle since sample was weighted 
     trainsample = set(sample[:numtrain])
     devsample = set(sample[numtrain:numtrain+numdev])
@@ -46,21 +183,24 @@ def naive_sample(indices_to_words, numtrain, numdev, numtest):
     return trainsample, devsample, testsample
 
 
-def maxoverlap_sample(largetrainindices, indices_to_words, testindices, numtrain, maxoverlap):
+def maxoverlap_sample(largetrainindices, indices_to_words, testindices, numtrain, max_foverlap):
 
+    # The test set is already fixed at this point, so the only option is to manipulate the small training set
+    # This is tricker because changing one item from the small training set can change the test overlap by more than one
+    
     numtest = len(testindices)
     if numtrain + numtest > len(indices_to_words):
         print("Too many to sample!", numtrain+numtest, len(largetrainindices))
         exit()
 
     remainder = set(largetrainindices)
-    #to get remainder, remove 1-maxoverlap items, most common feats first
+    #to get remainder, remove 1-max_foverlap items, most common feats first
     feats_to_test = defaultdict(lambda : list())
     for index in testindices:
         feat = indices_to_words[index][FEATS]
         feats_to_test[feat].append(index)
 
-    limit = ceil((1-maxoverlap)*numtest)
+    limit = ceil((1-max_foverlap)*numtest)
     removablefeats = sorted(feats_to_test.items(), key=lambda kv : len(kv[1]), reverse = True)
     removedfeats = set()
     numremoved = 0
@@ -141,45 +281,70 @@ def writesample(indices_to_words, indices, showinfl, outdir, fname):
             fout.write("%s\n" % "\t".join(word))
 
 
-def main(infname, outdir, numsmalltrain, numlargetrain, numdev, numtest, maxoverlap, weighted, language):
+def main(infname, outdir, numsmalltrain, numlargetrain, numdev, numtest, lt_loverlap, lt_foverlap, st_foverlap, weighted, language):
 
     if not os.path.exists(outdir):
         os.makedirs(outdir)
 
     print("Input:", infname)
+    indices_to_words = readcorpus(infname, weighted)
+    print("contains %s items" % len(indices_to_words))
     print("Output:", outdir)
     print("small train:", numsmalltrain, "large train:", numlargetrain, "dev:", numdev, "test:", numtest)
-    print("Requested small test overlap", round(maxoverlap*100,2))
+    print("Requested large test lemma overlap", round(lt_loverlap*100,2))
+    print("Requested large test feature overlap", round(lt_foverlap*100,2))
+    print("Requested small test feature overlap", round(st_foverlap*100,2))
 
-    indices_to_words = readcorpus(infname, weighted)
+    if len(indices_to_words) >= numlargetrain + numsmalltrain + numdev + numtest:
+        # Feature overlap is consistently near 100% on large train, so nothing else
+        #   needs to be done to ensure consistency
+        # The test set and dev sets output here are reused for both train sizes
+        if lt_loverlap and lt_foverlap:
+            largetrainindices, devindices, testindices = aware_sample(indices_to_words, numlargetrain, numdev, numtest, lemma_overlap_ratio=lt_loverlap, feat_overlap_ratio=lt_foverlap)
+        else:
+            largetrainindices, devindices, testindices = naive_sample(indices_to_words, numlargetrain, numdev, numtest)
 
-    # Feature overlap is consistently near 100% on large train, so nothing else
-    #   needs to be done to ensure consistency
-    # The test set and dev sets output here are reused for both train sizes
-    largetrainindices, devindices, testindices = naive_sample(indices_to_words, numlargetrain, numdev, numtest)
-    print("Achieved large-test overlap:")
-    largetraino, largetesto = compute_overlap(indices_to_words, largetrainindices, testindices, i=FEATS, printoverlap=True)
+        print("Achieved large-test feature overlap:")
+        largetraino, largetesto = compute_overlap(indices_to_words, largetrainindices, testindices, i=FEATS, printoverlap=True)
+        print("Achieved large-test lemma overlap:")
+        largetraino, largetesto = compute_overlap(indices_to_words, largetrainindices, testindices, i=LEMMA, printoverlap=True)
 
-    # Feature overlap needs to be controlled for for small train
-    smalltrainindices = multiple_sample(indices_to_words, largetrainindices, testindices, numsmalltrain, maxoverlap)
-    print("Achieved small-test overlap")
-    smalltraino, smalltesto = compute_overlap(indices_to_words, smalltrainindices, testindices, i=FEATS, printoverlap=True)
+        smalltrainindices = multiple_sample(indices_to_words, largetrainindices, testindices, numsmalltrain, st_foverlap)
+        print("Achieved small-test feature overlap")
+        smalltraino, smalltesto = compute_overlap(indices_to_words, smalltrainindices, testindices, i=FEATS, printoverlap=True)
+        print("Achieved small-test lemma overlap")
+        smalltraino, smalltesto = compute_overlap(indices_to_words, smalltrainindices, testindices, i=LEMMA, printoverlap=True)
 
-    print("Achieved large-dev overlap:")
-    largetraino, largedevo = compute_overlap(indices_to_words, largetrainindices, testindices, i=FEATS, printoverlap=True)
-    print("Achieved dev-test overlap")
-    devo, devtesto = compute_overlap(indices_to_words, devindices, testindices, i=1, printoverlap=True)
+        print("Illicit large train triples in dev?", len(set(largetrainindices).intersection(set(devindices))))
+        print("Illicit large train triples in test?", len(set(largetrainindices).intersection(set(testindices))))
 
-    print("Illicit large train triples in dev?", len(set(largetrainindices).intersection(set(devindices))))
-    print("Illicit large train triples in test?", len(set(largetrainindices).intersection(set(testindices))))
+        writesample(indices_to_words, largetrainindices, True, outdir, "%s_train_large.txt" % language)
+
+    elif len(indices_to_words) >= numsmalltrain+numdev+numtest:
+        # If there isn't enough data for large train, directly sample small train
+        print("TOO SMALL TO GENERATE LARGE TRAINING SET. Generating small training directly")
+        if lt_loverlap:
+            smalltrainindices, devindices, testindices = aware_sample(indices_to_words, numsmalltrain, numdev, numtest, lemma_overlap_ratio=lt_loverlap, feat_overlap_ratio=st_foverlap)
+        else:
+            smalltrainindices, devindices, testindices = naive_sample(indices_to_words, numsmalltrain, numdev, numtest)
+        print("Achieved small-test feature overlap")
+        smalltraino, smalltesto = compute_overlap(indices_to_words, smalltrainindices, testindices, i=FEATS, printoverlap=True)
+        print("Achieved small-test lemma overlap")
+        smalltraino, smalltesto = compute_overlap(indices_to_words, smalltrainindices, testindices, i=LEMMA, printoverlap=True)
+
+    else:
+        print("DATA SET TOO SMALL!")
+        exit()
+
     print("Illicit small train triples in dev?", len(set(smalltrainindices).intersection(set(devindices))))
     print("Illicit small train triples in test?", len(set(smalltrainindices).intersection(set(testindices))))
     print("Illicit dev triples in test?", len(set(smalltrainindices).intersection(set(testindices))))
 
     writesample(indices_to_words, testindices, False, outdir,  "%s_test.txt" % language)
+    writesample(indices_to_words, testindices, True, outdir,  "%s_testgold.txt" % language)
     writesample(indices_to_words, devindices, True, outdir, "%s_dev.txt" % language)
     writesample(indices_to_words, smalltrainindices, True, outdir, "%s_train_small.txt" % language)
-    writesample(indices_to_words, largetrainindices, True, outdir, "%s_train_large.txt" % language)
+
 
 
 
@@ -191,10 +356,12 @@ if __name__=="__main__":
     parser.add_argument("--large", type=int, help = "size of large training set")
     parser.add_argument("--dev", type=int, help = "size of dev set")
     parser.add_argument("--test", type=int, help = "size of test set")
-    parser.add_argument("--maxoverlap", type=float, help = "requested max smalltrain-test feature set overlap. Float in range [0,1]")
-    parser.add_argument("--weighted", action="store_true", help="weight sampling by frequency")
+    parser.add_argument("--lt_loverlap",  type=float, help = "requested max largetrain-test lemma set overlap. Float in range [0,1]. Optional. If this or lt_floverlap are omitted, overlaps are uncontrolled in large train")
+    parser.add_argument("--lt_foverlap",  type=float, help = "requested max largetrain-test feature set overlap. Float in range [0,1]. Optional. If this or lt_lloverlap are omitted, overlaps are uncontrolled in large train")
+    parser.add_argument("--st_foverlap", type=float, help = "requested max smalltrain-test feature set overlap. Float in range [0,1]")
+    parser.add_argument("--weighted", action="store_true", help="weight sampling by frequencies provided in 4th column")
     parser.add_argument("--lang", help = "language to be written in output filenames")
     args = parser.parse_args()
     
-    main(args.infname, args.outdir, args.small, args.large, args.dev, args.test, args.maxoverlap, args.weighted, args.lang)
+    main(args.infname, args.outdir, args.small, args.large, args.dev, args.test, args.lt_loverlap, args.lt_foverlap, args.st_foverlap, args.weighted, args.lang)
 
